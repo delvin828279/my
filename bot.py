@@ -8,609 +8,318 @@ import asyncio
 import schedule
 import time
 import threading
+import re
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, parse_qs
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from datetime import datetime
-from PIL import Image, ImageDraw, ImageFont
-import io
 
 # ─── تنظیمات ───────────────────────────────────────────
-BOT_TOKEN  = os.environ.get("BOT_TOKEN", "")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
+BOT_TOKEN  = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "YOUR_CHANNEL_ID_HERE")
 SEND_INTERVAL_MINUTES = 5
 
-PROXY_SOURCES = {
-    'proxybolt': 'https://proxybolt.link/',
-    'text_files': [
+# منابع دریافت پروکسی تلگرام و کانفیگ‌های Vless
+SOURCES = {
+    'mtproto_bolt': 'https://proxybolt.link/',
+    'mtproto_github': [
         f"https://raw.githubusercontent.com/V2RAYCONFIGSPOOL/TELEGRAM_PROXY_SUB/refs/heads/main/telegram_proxy_no{i}.txt"
-        for i in range(1, 21)
+        for i in range(1, 6) # ۵ منبع اول برای بهینه‌سازی سرعت و مصرف رم
+    ],
+    'vless_github': [
+        "https://raw.githubusercontent.com/DeX7eR-0/V2RAY-CONFIGS/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/mohammadw9/FreeV2rayConfigs/main/vless.txt"
     ]
 }
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
 COUNTRY_FLAGS = {
     "United States": "🇺🇸", "Germany": "🇩🇪", "Netherlands": "🇳🇱",
     "France": "🇫🇷", "United Kingdom": "🇬🇧", "Canada": "🇨🇦",
     "Singapore": "🇸🇬", "Japan": "🇯🇵", "Russia": "🇷🇺",
-    "Ukraine": "🇺🇦", "Finland": "🇫🇮", "Sweden": "🇸🇪",
-    "Poland": "🇵🇱", "Turkey": "🇹🇷", "Iran": "🇮🇷",
-    "China": "🇨🇳", "South Korea": "🇰🇷", "Brazil": "🇧🇷",
-    "India": "🇮🇳", "Australia": "🇦🇺", "Switzerland": "🇨🇭",
-    "Austria": "🇦🇹", "Czech Republic": "🇨🇿", "Romania": "🇷🇴",
-    "Hungary": "🇭🇺", "Bulgaria": "🇧🇬", "Latvia": "🇱🇻",
-    "Lithuania": "🇱🇹", "Estonia": "🇪🇪", "Moldova": "🇲🇩",
-    "Luxembourg": "🇱🇺", "Belgium": "🇧🇪", "Italy": "🇮🇹",
-    "Spain": "🇪🇸", "Portugal": "🇵🇹", "Norway": "🇳🇴",
-    "Denmark": "🇩🇰", "Israel": "🇮🇱", "UAE": "🇦🇪",
-    "Saudi Arabia": "🇸🇦", "Mexico": "🇲🇽",
+    "Turkey": "🇹🇷", "Finland": "🇫🇮", "Sweden": "🇸🇪"
 }
 
-_geo_cache    = {}
-_last_proxies = []
+_geo_cache = {}
 _stats = {
     "total_checked": 0,
     "total_active":  0,
-    "best_ping":     9999,
-    "best_country":  "",
-    "send_count":    0,
     "start_time":    datetime.now(),
 }
 
+# بانک اطلاعات حافظه موقت (کَش هوشمند)
+_CACHED_MTPROTO = []
+_CACHED_VLESS   = []
 
 # ══════════════════════════════════════════════════════════
-#  ابزارها
+#  ابزارهای استخراج و ژئولوکیشن
 # ══════════════════════════════════════════════════════════
 
 def get_location(host):
-    if not host:
-        return {"country": "Unknown", "city": "", "isp": "", "flag": "🌍"}
-    if host in _geo_cache:
-        return _geo_cache[host]
+    if not host or host.replace('.', '').isdigit() is False:
+        # اگر هاست به صورت دامنه بود آی‌پی آن را می‌گیریم
+        try: host = socket.gethostbyname(host)
+        except: return {"country": "Unknown", "city": "", "flag": "🌍"}
+        
+    if host in _geo_cache: return _geo_cache[host]
     try:
-        r = requests.get(f"http://ip-api.com/json/{host}?fields=country,city,isp", timeout=5)
+        r = requests.get(f"http://ip-api.com/json/{host}?fields=country,city", timeout=2)
         d = r.json()
         if d.get('country'):
             country = d['country']
-            result = {
-                "country": country,
-                "city":    d.get('city', ''),
-                "isp":     d.get('isp', ''),
-                "flag":    COUNTRY_FLAGS.get(country, '🌍')
-            }
-            _geo_cache[host] = result
-            return result
-    except Exception:
-        pass
-    result = {"country": "Unknown", "city": "", "isp": "", "flag": "🌍"}
-    _geo_cache[host] = result
-    return result
-
-
-def ping_label(ms, from_iran=False):
-    flag = "🇮🇷 " if from_iran else ""
-    if ms is None:
-        return "❌ N/A"
-    elif ms < 80:
-        return f"{flag}🟢 {ms}ms"
-    elif ms < 200:
-        return f"{flag}🟡 {ms}ms"
-    else:
-        return f"{flag}🔴 {ms}ms"
-
-
-def parse_proxy_link(line):
-    line = line.strip()
-    if not line:
-        return None
-    if "t.me/proxy" in line:
-        tg_link = line.replace("https://t.me/proxy", "tg://proxy", 1)
-        tg_link = tg_link.replace("http://t.me/proxy", "tg://proxy", 1)
-    elif line.startswith("tg://proxy"):
-        tg_link = line
-    else:
-        return None
-    try:
-        parsed = urlparse(tg_link)
-        params = parse_qs(parsed.query)
-        host   = params.get('server', [''])[0]
-        port   = params.get('port', [''])[0]
-        secret = params.get('secret', [''])[0]
-        if not host or not port:
-            return None
-        return {"link": tg_link, "host": host, "port": port, "secret": secret,
-                "name": "", "country": "", "city": "", "isp": "", "flag": "🌍", "ping": None}
-    except Exception:
-        return None
-
+            res = {"country": country, "city": d.get('city', ''), "flag": COUNTRY_FLAGS.get(country, '🌍')}
+            _geo_cache[host] = res
+            return res
+    except: pass
+    return {"country": "Unknown", "city": "", "flag": "🌍"}
 
 def escape_md(text):
-    text = str(text)
     for ch in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
-        text = text.replace(ch, f'\\{ch}')
+        text = str(text).replace(ch, f'\\{ch}')
     return text
 
-
-# ══════════════════════════════════════════════════════════
-#  دریافت پروکسی
-# ══════════════════════════════════════════════════════════
-
-def get_from_proxybolt():
+def parse_vless_host(config_link):
     try:
-        r = requests.get(PROXY_SOURCES['proxybolt'], headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.content, 'html.parser')
-        app_div = soup.find('div', id='app')
-        if not app_div or 'data-page' not in app_div.attrs:
-            return []
-        page_data   = json.loads(app_div['data-page'])
-        proxies_raw = page_data.get('props', {}).get('proxies', [])
-        print(f"✅ ProxyBolt: {len(proxies_raw)} پروکسی")
-        result = []
-        for p in proxies_raw:
+        # استخراج هاست و پورت از لینک vless
+        server_part = config_link.split('@')[1]
+        host_port = server_part.split('?')[0].split('#')[0]
+        host = host_port.split(':')[0]
+        port = host_port.split(':')[1] if ':' in host_port else "443"
+        return host, port
+    except:
+        return None, None
+
+# ══════════════════════════════════════════════════════════
+#  تست با Check-Host (بدون قفل کردن سرور)
+# ══════════════════════════════════════════════════════════
+
+IRAN_NODES = ["ir1.node.check-host.net", "ir4.node.check-host.net"]
+
+def check_iran_connection(host, port):
+    try:
+        node = random.choice(IRAN_NODES)
+        url = f"https://check-host.net/check-tcp?host={host}:{port}&max_nodes=1&node={node}"
+        r = requests.get(url, headers={"Accept": "application/json"}, timeout=4)
+        req_id = r.json().get("request_id")
+        if not req_id: return None
+        time.sleep(2) # زمان انتظار برای پاسخ چک هاست
+        res = requests.get(f"https://check-host.net/check-result/{req_id}", timeout=4).json()
+        pings = []
+        for n_res in res.values():
+            if n_res and isinstance(n_res, list):
+                for item in n_res:
+                    if isinstance(item, dict) and "time" in item: pings.append(int(item["time"] * 1000))
+        return min(pings) if pings else None
+    except: return None
+
+def test_single_server(item):
+    """تست همزمان پینگ ایران برای انواع کانکشن‌ها"""
+    host, port = item['host'], item['port']
+    ping = check_iran_connection(host, port)
+    if ping is not None:
+        item['ping'] = ping
+        return item
+    return None
+
+# ══════════════════════════════════════════════════════════
+#  اسکنر منابع و به‌روزرسانی کَش
+# ══════════════════════════════════════════════════════════
+
+def update_system_cache():
+    global _CACHED_MTPROTO, _CACHED_VLESS, _stats
+    print("🔍 شروع اسکن و تست سرورها...")
+    
+    # --- ۱. جمع‌آوری MTProto ---
+    raw_mtproto = []
+    # از سایت proxybolt
+    try:
+        r = requests.get(SOURCES['mtproto_bolt'], headers=HEADERS, timeout=8)
+        page_data = json.loads(BeautifulSoup(r.content, 'html.parser').find('div', id='app')['data-page'])
+        for p in page_data.get('props', {}).get('proxies', []):
             if p.get('host'):
                 link = f"tg://proxy?server={p['host']}&port={p['port']}&secret={p.get('secret','')}"
-                result.append({"link": link, "host": p['host'], "port": str(p['port']),
-                                "secret": p.get('secret', ''), "name": p.get('name', ''),
-                                "country": "", "city": "", "isp": "", "flag": "🌍", "ping": None})
-        return result
-    except Exception as e:
-        print(f"❌ ProxyBolt: {e}")
-        return []
-
-
-def get_from_text_files():
-    all_proxies = []
-    for url in PROXY_SOURCES['text_files']:
+                raw_mtproto.append({"type": "mtproto", "link": link, "host": p['host'], "port": str(p['port'])})
+    except: pass
+    # از گیت‌هاب
+    for url in SOURCES['mtproto_github']:
         try:
-            r = requests.get(url, headers=HEADERS, timeout=8)
-            r.raise_for_status()
+            r = requests.get(url, headers=HEADERS, timeout=4)
             for line in r.text.strip().split('\n'):
-                proxy = parse_proxy_link(line)
-                if proxy:
-                    all_proxies.append(proxy)
-        except Exception:
-            continue
-    print(f"✅ فایل‌های متنی: {len(all_proxies)} پروکسی")
-    return all_proxies
+                if "server=" in line:
+                    p = parse_qs(urlparse(line.strip().replace("https://t.me/proxy", "tg://proxy")).query)
+                    if p.get('server'): raw_mtproto.append({"type": "mtproto", "link": line.strip(), "host": p['server'][0], "port": p['port'][0]})
+        except: continue
 
+    # --- ۲. جمع‌آوری Vless ---
+    raw_vless = []
+    for url in SOURCES['vless_github']:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=5)
+            matches = re.findall(r'(vless://[^\s]+)', r.text)
+            for link in matches:
+                host, port = parse_vless_host(link)
+                if host: raw_vless.append({"type": "vless", "link": link, "host": host, "port": port})
+        except: continue
 
-# نودهای ایران در check-host.net
-IRAN_NODES = [
-    "ir1.node.check-host.net",  # تهران
-    "ir4.node.check-host.net",  # تبریز
-    "ir3.node.check-host.net",  # شیراز
-    "ir6.node.check-host.net",  # کرج
-]
+    # حذف تکراری‌ها و محدود کردن تعداد برای جلوگیری از پر شدن رم آمورا
+    unique_mtproto = {f"{x['host']}:{x['port']}": x for x in raw_mtproto}.values()
+    unique_vless = {f"{x['host']}:{x['port']}": x for x in raw_vless}.values()
+    
+    test_list = list(unique_mtproto)[:25] + list(unique_vless)[:25]
+    _stats["total_checked"] += len(test_list)
 
-_checkhost_headers = {"Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+    # تست همزمان با تعداد محدود تِرد (Max_Workers=6) برای امنیت رم سرور
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        results = list(executor.map(test_single_server, test_list))
+    
+    active_items = [r for r in results if r is not None]
+    _stats["total_active"] += len(active_items)
 
-def get_iran_ping(host, port):
-    """پینگ از ایران با check-host.net API"""
-    try:
-        nodes = random.sample(IRAN_NODES, 2)
-        node_params = "&".join([f"node={n}" for n in nodes])
-        url = f"https://check-host.net/check-tcp?host={host}:{port}&max_nodes=2&{node_params}"
-        r = requests.get(url, headers=_checkhost_headers, timeout=10)
-        request_id = r.json().get("request_id")
-        if not request_id:
-            return None
+    # تفکیک و اعمال ژئولوکیشن و ذخیره در کَش
+    new_mtproto, new_vless = [], []
+    for item in active_items:
+        geo = get_location(item['host'])
+        item.update(geo)
+        if item['type'] == "mtproto": new_mtproto.append(item)
+        else: new_vless.append(item)
 
-        time.sleep(3)  # صبر برای انجام چک
+    # مرتب‌سازی بر اساس کمترین پینگ
+    new_mtproto.sort(key=lambda x: x['ping'])
+    new_vless.sort(key=lambda x: x['ping'])
 
-        result = requests.get(
-            f"https://check-host.net/check-result/{request_id}",
-            headers=_checkhost_headers, timeout=10
-        ).json()
-
-        pings = []
-        for node_result in result.values():
-            if not node_result:
-                continue
-            if isinstance(node_result, list):
-                for item in node_result:
-                    if isinstance(item, dict) and "time" in item:
-                        pings.append(int(item["time"] * 1000))
-                    elif isinstance(item, list) and item:
-                        for sub in item:
-                            if isinstance(sub, (int, float)):
-                                pings.append(int(sub * 1000))
-                                break
-
-        return min(pings) if pings else None
-    except Exception:
-        return None
-
-
-def check_and_ping(proxy):
-    """چک اتصال + پینگ از ایران"""
-    try:
-        host, port = proxy['host'], int(proxy['port'])
-
-        # چک سریع اتصال
-        start = time.time()
-        with socket.create_connection((host, port), timeout=3):
-            local_ping = int((time.time() - start) * 1000)
-
-        # پینگ از ایران
-        iran_ping = get_iran_ping(host, port)
-        proxy['ping'] = iran_ping if iran_ping is not None else local_ping
-        proxy['from_iran'] = iran_ping is not None
-        return proxy
-    except Exception:
-        return None
-
-
-def get_active_proxies(max_check=100, return_count=5, country_filter=None):
-    global _stats, _last_proxies
-
-    all_p = get_from_proxybolt() + get_from_text_files()
-
-    seen, unique = set(), []
-    for p in all_p:
-        key = f"{p['host']}:{p['port']}"
-        if key not in seen:
-            seen.add(key)
-            unique.append(p)
-
-    print(f"📊 کل: {len(unique)}")
-    _stats["total_checked"] += min(len(unique), max_check)
-
-    with ThreadPoolExecutor(max_workers=40) as ex:
-        results = list(ex.map(check_and_ping, unique[:max_check]))
-    active = [r for r in results if r is not None]
-    active.sort(key=lambda x: x.get('ping') or 9999)
-
-    print(f"✅ فعال: {len(active)}")
-    _stats["total_active"] += len(active)
-
-    if active and active[0].get('ping', 9999) < _stats["best_ping"]:
-        _stats["best_ping"] = active[0]['ping']
-
-    # اضافه کردن لوکیشن و فیلتر
-    final = []
-    for p in active:
-        if len(final) >= return_count:
-            break
-        geo = get_location(p['host'])
-        p.update(geo)
-        time.sleep(0.1)
-        if country_filter:
-            if country_filter.lower() not in geo['country'].lower():
-                continue
-        final.append(p)
-
-    if final:
-        _stats["best_country"] = final[0].get('flag', '') + ' ' + final[0].get('country', '')
-
-    _last_proxies = final
-    return final
-
+    _CACHED_MTPROTO = new_mtproto[:10]
+    _CACHED_VLESS   = new_vless[:10]
+    print(f"✅ کَش بروز شد! MTProto مجاز: {len(_CACHED_MTPROTO)} | Vless مجاز: {len(_CACHED_VLESS)}")
 
 # ══════════════════════════════════════════════════════════
-#  بنر گرافیکی
+#  فرمت‌ساز پیام‌ها
 # ══════════════════════════════════════════════════════════
 
-def create_banner(proxies):
-    W = 800
-    H = 90 + len(proxies) * 95 + 40
-    img  = Image.new('RGB', (W, H), color=(15, 15, 28))
-    draw = ImageDraw.Draw(img)
-
-    # هدر
-    draw.rectangle([0, 0, W, 65], fill=(25, 25, 55))
-    draw.text((W // 2, 22), "🔐  Telegram Proxy List", fill=(130, 180, 255), anchor="mm")
-    draw.text((W // 2, 50), datetime.now().strftime("%Y-%m-%d   %H:%M  UTC"), fill=(100, 100, 160), anchor="mm")
-    draw.line([(0, 66), (W, 66)], fill=(50, 50, 100), width=2)
-
-    y = 76
-    for i, p in enumerate(proxies):
-        ping      = p.get('ping')
-        from_iran = p.get('from_iran', False)
-        flag      = p.get('flag', '🌍')
-        country   = p.get('country', 'Unknown')
-        city      = p.get('city', '')
-        host      = p.get('host', '')
-        port      = p.get('port', '')
-
-        if ping is None:
-            pc, pt = (180, 60, 60),  "N/A"
-        elif ping < 80:
-            pc, pt = (60, 210, 100), f"{ping} ms"
-        elif ping < 200:
-            pc, pt = (210, 190, 60), f"{ping} ms"
-        else:
-            pc, pt = (210, 100, 60), f"{ping} ms"
-
-        iran_label = " 🇮🇷" if from_iran else ""
-
-        draw.rounded_rectangle([12, y, W - 12, y + 82], radius=12, fill=(22, 22, 42))
-        draw.text((36, y + 14), f"#{i+1}", fill=(80, 130, 240))
-
-        loc = f"{flag}  {city + ', ' if city else ''}{country}"
-        draw.text((68, y + 11), loc, fill=(220, 220, 255))
-        draw.text((68, y + 40), f"  {host}:{port}", fill=(140, 200, 150))
-
-        # ping badge
-        draw.rounded_rectangle([W - 145, y + 20, W - 25, y + 60], radius=8, fill=(30, 30, 55))
-        draw.text(((W - 145 + W - 25) // 2, y + 33), pt + iran_label, fill=pc, anchor="mm")
-        if from_iran:
-            draw.text(((W - 145 + W - 25) // 2, y + 52), "از ایران", fill=(150, 150, 200), anchor="mm")
-
-        y += 92
-
-    # فوتر
-    draw.rectangle([0, H - 35, W, H], fill=(20, 20, 45))
-    draw.text((W // 2, H - 17),
-              f"Auto update every {SEND_INTERVAL_MINUTES} min  •  Sorted by speed",
-              fill=(80, 80, 130), anchor="mm")
-
-    buf = io.BytesIO()
-    img.save(buf, format='PNG')
-    buf.seek(0)
-    return buf
-
-
-# ══════════════════════════════════════════════════════════
-#  ارسال پست
-# ══════════════════════════════════════════════════════════
-
-def format_caption(proxies):
-    lines = ["🔐 *پروکسی‌های تلگرام \\- فعال و تست شده*", "━━━━━━━━━━━━━━━━━━━━\n"]
-    for i, p in enumerate(proxies, 1):
-        flag       = p.get('flag', '🌍')
-        country    = escape_md(p.get('country', 'Unknown'))
-        city       = escape_md(p.get('city', ''))
-        isp        = escape_md(p.get('isp', ''))
-        host       = p.get('host', '')
-        port       = p.get('port', '')
-        link       = p.get('link', '')
-        from_iran  = p.get('from_iran', False)
-        loc        = f"{city}, {country}" if city else country
-        lines.append(f"*{i}\\. {flag} {loc}*")
-        lines.append(f"⚡ {escape_md(ping_label(p.get('ping'), from_iran))}")
-        lines.append(f"🖥 `{host}:{port}`")
-        if isp:
-            lines.append(f"🏢 {isp}")
-        lines.append(f"[🔗 اتصال مستقیم]({link})\n")
+def format_mtproto_msg(proxies):
+    lines = ["🔐 *پروکسی‌های فعال تلگرام \\(MTProto\\)*", "━━━━━━━━━━━━━━━━━━━━\n"]
+    for i, p in enumerate(proxies[:5], 1):
+        lines.append(f"*{i}\\. {p['flag']} {escape_md(p['country'])}*")
+        lines.append(f"⚡ پینگ ایران: `{p['ping']}ms`")
+        lines.append(f"[🔗 اتصال به سرور]({p['link']})\n")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"⏱ بروزرسانی هر {SEND_INTERVAL_MINUTES} دقیقه")
-    lines.append("✅ مرتب‌شده بر اساس سرعت")
     return "\n".join(lines)
 
-
-async def send_proxy_post(bot, proxies=None, country_filter=None, chat_id=None):
-    global _stats
-    target = chat_id or CHANNEL_ID
-    if proxies is None:
-        proxies = get_active_proxies(max_check=100, return_count=5, country_filter=country_filter)
-    if not proxies:
-        return
-    caption = format_caption(proxies)
-    try:
-        banner = create_banner(proxies)
-        await bot.send_photo(chat_id=target, photo=banner, caption=caption, parse_mode="MarkdownV2")
-    except Exception:
-        await bot.send_message(chat_id=target, text=caption, parse_mode="MarkdownV2",
-                               disable_web_page_preview=True)
-    _stats["send_count"] += 1
-    print(f"✅ پست #{_stats['send_count']} ارسال شد")
-
+def format_vless_msg(configs):
+    lines = ["🚀 *کانفیگ‌های فعال V2ray \\(Vless\\)*", "━━━━━━━━━━━━━━━━━━━━\n"]
+    for i, c in enumerate(configs[:3], 1):
+        lines.append(f"*{i}\\. {c['flag']} {escape_md(c['country'])}*")
+        lines.append(f"⚡ پینگ ایران: `{c['ping']}ms`")
+        lines.append(f"📋 برای کپی روی کادر زیر بزنید:")
+        lines.append(f"`{escape_md(c['link'])}`\n")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    return "\n".join(lines)
 
 # ══════════════════════════════════════════════════════════
-#  نوتیف قطعی
+#  هندلرها و کیبوردهای شیشه‌ای ربات
 # ══════════════════════════════════════════════════════════
 
-async def check_alive_and_notify(bot):
-    global _last_proxies
-    if not _last_proxies:
-        return
-    dead = [p for p in _last_proxies if check_and_ping(dict(p)) is None]
-    if dead:
-        lines = ["⚠️ *هشدار: پروکسی‌های زیر قطع شدند\\!*\n"]
-        for p in dead:
-            lines.append(f"❌ `{p['host']}:{p['port']}` {p.get('flag','')} {escape_md(p.get('country',''))}")
-        lines.append("\n🔄 پروکسی جدید در حال ارسال\\.\\.\\.")
-        try:
-            await bot.send_message(chat_id=CHANNEL_ID, text="\n".join(lines), parse_mode="MarkdownV2")
-        except Exception as e:
-            print(f"❌ نوتیف: {e}")
-
-
-# ══════════════════════════════════════════════════════════
-#  آمار روزانه
-# ══════════════════════════════════════════════════════════
-
-async def send_daily_stats(bot):
-    uptime = datetime.now() - _stats["start_time"]
-    h = int(uptime.total_seconds() // 3600)
-    lines = [
-        "📊 *آمار روزانه کانال*",
-        "━━━━━━━━━━━━━━━\n",
-        f"🔍 کل پروکسی چک‌شده: `{_stats['total_checked']}`",
-        f"✅ کل پروکسی فعال: `{_stats['total_active']}`",
-        f"📤 تعداد پست‌ها: `{_stats['send_count']}`",
-        f"🏆 بهترین ping: `{_stats['best_ping']}ms` {escape_md(_stats['best_country'])}",
-        f"⏳ آپتایم: `{h}` ساعت",
-        "\n━━━━━━━━━━━━━━━",
-        "💡 به ربات پیام بده و پروکسی بگیر\\!"
-    ]
-    try:
-        await bot.send_message(chat_id=CHANNEL_ID, text="\n".join(lines), parse_mode="MarkdownV2")
-    except Exception as e:
-        print(f"❌ آمار: {e}")
-
-
-# ══════════════════════════════════════════════════════════
-#  کامندهای ربات
-# ══════════════════════════════════════════════════════════
-
-def main_keyboard():
+def build_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 ۵ پروکسی تصادفی",         callback_data="get_5")],
-        [InlineKeyboardButton("⚡ سریع‌ترین‌ها (زیر ۵۰ms)", callback_data="get_fast")],
-        [
-            InlineKeyboardButton("🇩🇪 آلمان",  callback_data="country_Germany"),
-            InlineKeyboardButton("🇳🇱 هلند",   callback_data="country_Netherlands"),
-            InlineKeyboardButton("🇺🇸 آمریکا", callback_data="country_United States"),
-        ],
-        [
-            InlineKeyboardButton("🇫🇮 فنلاند", callback_data="country_Finland"),
-            InlineKeyboardButton("🇫🇷 فرانسه", callback_data="country_France"),
-            InlineKeyboardButton("🇸🇪 سوئد",   callback_data="country_Sweden"),
-        ],
-        [InlineKeyboardButton("📊 آمار ربات", callback_data="stats")],
+        [InlineKeyboardButton("🔐 پروکسی‌های تلگرام", callback_data="show_mtproto"),
+         InlineKeyboardButton("🚀 کانفیگ‌های V2ray", callback_data="show_vless")],
+        [InlineKeyboardButton("🎲 اتصال شانس (تصادفی)", callback_data="random_connect")],
+        [InlineKeyboardButton("📋 کپی یکجای پروکسی‌ها", callback_data="copy_all"),
+         InlineKeyboardButton("📊 آمار سرور", callback_data="show_stats")]
     ])
 
-
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "👋 *سلام\\! به ربات پروکسی خوش اومدی* 🎉\n\n"
-        "از دکمه‌های زیر پروکسی دلخواهت رو انتخاب کن:\n\n"
-        f"🔄 کانال هر `{SEND_INTERVAL_MINUTES}` دقیقه آپدیت میشه\n"
-        "⚡ پروکسی‌ها بر اساس سرعت مرتب‌ان\n"
-        "🌍 لوکیشن و ISP هر پروکسی نشون داده میشه"
-    )
-    await update.message.reply_text(text, parse_mode="MarkdownV2", reply_markup=main_keyboard())
-
-
-async def cmd_proxy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⏳ در حال دریافت پروکسی\\.\\.\\.", parse_mode="MarkdownV2")
-    proxies = get_active_proxies(return_count=5)
-    await msg.delete()
-    await send_proxy_post(ctx.bot, proxies=proxies, chat_id=update.effective_chat.id)
-
-
-async def cmd_fast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⚡ جستجوی سریع‌ترین پروکسی‌ها\\.\\.\\.", parse_mode="MarkdownV2")
-    proxies = get_active_proxies(max_check=120, return_count=10)
-    fast = [p for p in proxies if p.get('ping') and p['ping'] < 50][:5] or proxies[:5]
-    await msg.delete()
-    await send_proxy_post(ctx.bot, proxies=fast, chat_id=update.effective_chat.id)
-
-
-async def cmd_country(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        await update.message.reply_text(
-            "📌 مثال: `/country germany`\n`/country netherlands`\n`/country finland`",
-            parse_mode="MarkdownV2"
-        )
-        return
-    country = " ".join(ctx.args)
-    msg = await update.message.reply_text(
-        f"🌍 جستجوی پروکسی {escape_md(country)}\\.\\.\\.", parse_mode="MarkdownV2"
-    )
-    proxies = get_active_proxies(max_check=120, return_count=5, country_filter=country)
-    await msg.delete()
-    if proxies:
-        await send_proxy_post(ctx.bot, proxies=proxies, chat_id=update.effective_chat.id)
-    else:
-        await update.message.reply_text(
-            f"❌ پروکسی از {escape_md(country)} پیدا نشد\\.", parse_mode="MarkdownV2"
-        )
-
-
-async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    h = int((datetime.now() - _stats["start_time"]).total_seconds() // 3600)
-    text = (
-        "📊 *آمار ربات*\n━━━━━━━━━━━━━━━\n\n"
-        f"🔍 کل چک‌شده: `{_stats['total_checked']}`\n"
-        f"✅ کل فعال: `{_stats['total_active']}`\n"
-        f"📤 پست‌های ارسالی: `{_stats['send_count']}`\n"
-        f"🏆 بهترین ping: `{_stats['best_ping']}ms`\n"
-        f"⏳ آپتایم: `{h}` ساعت"
-    )
-    # هم از پیام مستقیم هم از دکمه کار می‌کنه
-    if update.callback_query:
-        await update.callback_query.message.reply_text(text, parse_mode="MarkdownV2")
-    elif update.message:
-        await update.message.reply_text(text, parse_mode="MarkdownV2")
-
+    text = "👋 *به ابر\\-ربات هوشمند ضد فیلتر خوش آمدید\\!*\n\nتمام سرورها به صورت شبانه‌روزی تست شده و موارد فیلترشده در ایران خودکار حذف می‌شوند\\."
+    await update.message.reply_text(text, parse_mode="MarkdownV2", reply_markup=build_menu())
 
 async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    data  = query.data
-    cid   = query.message.chat_id
+    await query.answer() # حل قطعی مشکل تایم‌اوت دکمه
+    data = query.data
 
-    loading = await query.message.reply_text("⏳ لطفاً صبر کن\\.\\.\\.", parse_mode="MarkdownV2")
-
-    if data == "get_5":
-        proxies = get_active_proxies(return_count=5)
-    elif data == "get_fast":
-        all_p   = get_active_proxies(max_check=120, return_count=10)
-        proxies = [p for p in all_p if p.get('ping') and p['ping'] < 50][:5] or all_p[:5]
-    elif data.startswith("country_"):
-        country = data.replace("country_", "")
-        proxies = get_active_proxies(max_check=120, return_count=5, country_filter=country)
-    elif data == "stats":
-        await loading.delete()
-        await cmd_stats(update, ctx)
+    if not _CACHED_MTPROTO and not _CACHED_VLESS:
+        await query.message.reply_text("⏳ بانک سرورها در حال بارگذاری اولیه است؛ لطفاً ۱ دقیقه دیگر تست کنید\\.")
         return
-    else:
-        proxies = []
 
-    await loading.delete()
-
-    if proxies:
-        await send_proxy_post(ctx.bot, proxies=proxies, chat_id=cid)
-    else:
-        await query.message.reply_text("❌ پروکسی پیدا نشد\\. دوباره امتحان کن\\.", parse_mode="MarkdownV2")
-
+    if data == "show_mtproto":
+        await query.message.reply_text(format_mtproto_msg(_CACHED_MTPROTO), parse_mode="MarkdownV2", disable_web_page_preview=True)
+        
+    elif data == "show_vless":
+        if not _CACHED_VLESS:
+            await query.message.reply_text("❌ در حال حاضر کانفیگ Vless سالمی پیدا نشد\\.")
+        else:
+            await query.message.reply_text(format_vless_msg(_CACHED_VLESS), parse_mode="MarkdownV2")
+            
+    elif data == "random_connect":
+        # انتخاب رندوم از بین بهترین سرورها
+        pool = _CACHED_MTPROTO[:3] + _CACHED_VLESS[:3]
+        selected = random.choice(pool)
+        if selected['type'] == "mtproto":
+            txt = f"🎲 *پروکسی شانس شما \\(MTProto\\):*\n\n🌍 کشور: {selected['flag']} {escape_md(selected['country'])}\n⚡ پینگ: `{selected['ping']}ms`\n\n[🔗 برای اتصال فوری کلیک کنید]({selected['link']})"
+            await query.message.reply_text(txt, parse_mode="MarkdownV2")
+        else:
+            txt = f"🎲 *کانفیگ شانس شما \\(Vless\\):*\n\n🌍 کشور: {selected['flag']} {escape_md(selected['country'])}\n⚡ پینگ: `{selected['ping']}ms`\n\n📋 جهت کپی لمس کنید:\n`{escape_md(selected['link'])}`"
+            await query.message.reply_text(txt, parse_mode="MarkdownV2")
+            
+    elif data == "copy_all":
+        # ارسال لیست خام برای کپی راحت یکجا
+        lines = ["📋 *کپی یکجای لینک‌های فعال برای اشتراک‌گذاری:*\n"]
+        for p in _CACHED_MTPROTO[:5]: lines.append(f"`{escape_md(p['link'])}`")
+        await query.message.reply_text("\n\n".join(lines), parse_mode="MarkdownV2")
+        
+    elif data == "show_stats":
+        uptime_hours = int((datetime.now() - _stats["start_time"]).total_seconds() // 3600)
+        text = f"📊 *وضعیت پایداری ربات آمورا*\n\n🔍 کل سرورهای بررسی شده: `{_stats['total_checked']}`\n✅ سرورهای زنده شناسایی شده: `{_stats['total_active']}`\n⏱ آپتایم سیستم: `{uptime_hours}` ساعت"
+        await query.message.reply_text(text, parse_mode="MarkdownV2")
 
 # ══════════════════════════════════════════════════════════
-#  زمان‌بند
+#  زمان‌بند ۲۴ ساعته (Background Thread)
 # ══════════════════════════════════════════════════════════
 
 def run_schedule(bot_instance):
-    def sync_periodic():
-        async def _job():
-            await check_alive_and_notify(bot_instance)
-            await send_proxy_post(bot_instance)
-        asyncio.run(_job())
+    # اجرای اول برای پر شدن کَش به محض روشن شدن ربات
+    update_system_cache()
+    
+    def job():
+        update_system_cache()
+        # ارسال خودکار به کانال در صورت تنظیم CHANNEL_ID
+        if CHANNEL_ID and _CACHED_MTPROTO:
+            try:
+                asyncio.run(bot_instance.send_message(
+                    chat_id=CHANNEL_ID, 
+                    text=format_mtproto_msg(_CACHED_MTPROTO) + "\n\n🤖 @YourBotID", 
+                    parse_mode="MarkdownV2", 
+                    disable_web_page_preview=True
+                ))
+            except Exception as e: print(f"خطای ارسال به کانال: {e}")
 
-    def sync_daily():
-        asyncio.run(send_daily_stats(bot_instance))
-
-    schedule.every(SEND_INTERVAL_MINUTES).minutes.do(sync_periodic)
-    schedule.every().day.at("09:00").do(sync_daily)
-
-    print(f"⏰ زمان‌بند فعال: هر {SEND_INTERVAL_MINUTES} دقیقه")
+    schedule.every(SEND_INTERVAL_MINUTES).minutes.do(job)
     while True:
         schedule.run_pending()
-        time.sleep(15)
-
+        time.sleep(10)
 
 # ══════════════════════════════════════════════════════════
-#  main
+#  اجرای اصلی (Main)
 # ══════════════════════════════════════════════════════════
 
 def main():
-    print("🚀 ربات پروکسی شروع به کار کرد!")
+    if not BOT_TOKEN or "YOUR_" in BOT_TOKEN:
+        print("❌ خطای توکن! لطفا توکن ربات خود را در متغیرهای محیطی یا کد ست کنید.")
+        return
 
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",   cmd_start))
-    app.add_handler(CommandHandler("proxy",   cmd_proxy))
-    app.add_handler(CommandHandler("fast",    cmd_fast))
-    app.add_handler(CommandHandler("country", cmd_country))
-    app.add_handler(CommandHandler("stats",   cmd_stats))
+    app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    # زمان‌بند در thread جداگانه
+    # راه‌اندازی بخش اسکنر در ترد جداگانه دائم‌الکار
     bot_instance = Bot(token=BOT_TOKEN)
     threading.Thread(target=run_schedule, args=(bot_instance,), daemon=True).start()
 
-    # پست اول
-    asyncio.get_event_loop().run_until_complete(send_proxy_post(bot_instance))
-
-    print("🤖 ربات در حال اجراست...")
+    print("🚀 ربات چندمنظوره (MTProto + Vless) با سیستم کَش هوشمند فعال شد.")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
