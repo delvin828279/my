@@ -17,19 +17,21 @@ from datetime import datetime
 
 # ─── تنظیمات ───────────────────────────────────────────
 BOT_TOKEN  = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "YOUR_CHANNEL_ID_HERE")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "YOUR_CHANNEL_ID_HERE") # آیدی کانال شما با @ یا عدد
 SEND_INTERVAL_MINUTES = 5
 
-# منابع دریافت پروکسی تلگرام و کانفیگ‌های Vless
 SOURCES = {
     'mtproto_bolt': 'https://proxybolt.link/',
     'mtproto_github': [
         f"https://raw.githubusercontent.com/V2RAYCONFIGSPOOL/TELEGRAM_PROXY_SUB/refs/heads/main/telegram_proxy_no{i}.txt"
-        for i in range(1, 6) # ۵ منبع اول برای بهینه‌سازی سرعت و مصرف رم
+        for i in range(1, 6)
     ],
     'vless_github': [
-        "https://raw.githubusercontent.com/DeX7eR-0/V2RAY-CONFIGS/main/All_Configs_Sub.txt",
-        "https://raw.githubusercontent.com/mohammadw9/FreeV2rayConfigs/main/vless.txt"
+        # منابع جدید با خروجی متن خام و مستقیم Vless
+        "https://raw.githubusercontent.com/IranianCypherpunks/sub/main/vless",
+        "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
+        "https://raw.githubusercontent.com/MustafaBaqer/VestraNet-Nodes/main/protocols/vless.txt",
+        "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/V2Ray-Config-By-EbraSha.txt"
     ]
 }
 
@@ -51,17 +53,16 @@ _stats = {
     "start_time":    datetime.now(),
 }
 
-# بانک اطلاعات حافظه موقت (کَش هوشمند)
 _CACHED_MTPROTO = []
 _CACHED_VLESS   = []
 
 # ══════════════════════════════════════════════════════════
-#  ابزارهای استخراج و ژئولوکیشن
+#  ابزارها
 # ══════════════════════════════════════════════════════════
 
 def get_location(host):
-    if not host or host.replace('.', '').isdigit() is False:
-        # اگر هاست به صورت دامنه بود آی‌پی آن را می‌گیریم
+    if not host: return {"country": "Unknown", "city": "", "flag": "🌍"}
+    if host.replace('.', '').isdigit() is False:
         try: host = socket.gethostbyname(host)
         except: return {"country": "Unknown", "city": "", "flag": "🌍"}
         
@@ -84,7 +85,6 @@ def escape_md(text):
 
 def parse_vless_host(config_link):
     try:
-        # استخراج هاست و پورت از لینک vless
         server_part = config_link.split('@')[1]
         host_port = server_part.split('?')[0].split('#')[0]
         host = host_port.split(':')[0]
@@ -94,7 +94,7 @@ def parse_vless_host(config_link):
         return None, None
 
 # ══════════════════════════════════════════════════════════
-#  تست با Check-Host (بدون قفل کردن سرور)
+#  تست با Check-Host
 # ══════════════════════════════════════════════════════════
 
 IRAN_NODES = ["ir1.node.check-host.net", "ir4.node.check-host.net"]
@@ -106,7 +106,7 @@ def check_iran_connection(host, port):
         r = requests.get(url, headers={"Accept": "application/json"}, timeout=4)
         req_id = r.json().get("request_id")
         if not req_id: return None
-        time.sleep(2) # زمان انتظار برای پاسخ چک هاست
+        time.sleep(2)
         res = requests.get(f"https://check-host.net/check-result/{req_id}", timeout=4).json()
         pings = []
         for n_res in res.values():
@@ -117,7 +117,6 @@ def check_iran_connection(host, port):
     except: return None
 
 def test_single_server(item):
-    """تست همزمان پینگ ایران برای انواع کانکشن‌ها"""
     host, port = item['host'], item['port']
     ping = check_iran_connection(host, port)
     if ping is not None:
@@ -133,9 +132,8 @@ def update_system_cache():
     global _CACHED_MTPROTO, _CACHED_VLESS, _stats
     print("🔍 شروع اسکن و تست سرورها...")
     
-    # --- ۱. جمع‌آوری MTProto ---
     raw_mtproto = []
-    # از سایت proxybolt
+    # ۱. دریافت MTProto از سایت bolt
     try:
         r = requests.get(SOURCES['mtproto_bolt'], headers=HEADERS, timeout=8)
         page_data = json.loads(BeautifulSoup(r.content, 'html.parser').find('div', id='app')['data-page'])
@@ -144,7 +142,8 @@ def update_system_cache():
                 link = f"tg://proxy?server={p['host']}&port={p['port']}&secret={p.get('secret','')}"
                 raw_mtproto.append({"type": "mtproto", "link": link, "host": p['host'], "port": str(p['port'])})
     except: pass
-    # از گیت‌هاب
+
+    # ۲. دریافت MTProto از گیت‌هاب
     for url in SOURCES['mtproto_github']:
         try:
             r = requests.get(url, headers=HEADERS, timeout=4)
@@ -154,32 +153,31 @@ def update_system_cache():
                     if p.get('server'): raw_mtproto.append({"type": "mtproto", "link": line.strip(), "host": p['server'][0], "port": p['port'][0]})
         except: continue
 
-    # --- ۲. جمع‌آوری Vless ---
+    # ۳. دریافت Vless از گیت‌هاب
     raw_vless = []
     for url in SOURCES['vless_github']:
         try:
-            r = requests.get(url, headers=HEADERS, timeout=5)
+            r = requests.get(url, headers=HEADERS, timeout=6)
             matches = re.findall(r'(vless://[^\s]+)', r.text)
             for link in matches:
-                host, port = parse_vless_host(link)
+                # پاکسازی نام یا کاراکترهای اضافه از انتهای لینک Vless
+                clean_link = link.split('#')[0] if '#' in link else link
+                host, port = parse_vless_host(clean_link)
                 if host: raw_vless.append({"type": "vless", "link": link, "host": host, "port": port})
         except: continue
 
-    # حذف تکراری‌ها و محدود کردن تعداد برای جلوگیری از پر شدن رم آمورا
     unique_mtproto = {f"{x['host']}:{x['port']}": x for x in raw_mtproto}.values()
     unique_vless = {f"{x['host']}:{x['port']}": x for x in raw_vless}.values()
     
-    test_list = list(unique_mtproto)[:25] + list(unique_vless)[:25]
+    test_list = list(unique_mtproto)[:20] + list(unique_vless)[:20]
     _stats["total_checked"] += len(test_list)
 
-    # تست همزمان با تعداد محدود تِرد (Max_Workers=6) برای امنیت رم سرور
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         results = list(executor.map(test_single_server, test_list))
     
     active_items = [r for r in results if r is not None]
     _stats["total_active"] += len(active_items)
 
-    # تفکیک و اعمال ژئولوکیشن و ذخیره در کَش
     new_mtproto, new_vless = [], []
     for item in active_items:
         geo = get_location(item['host'])
@@ -187,13 +185,12 @@ def update_system_cache():
         if item['type'] == "mtproto": new_mtproto.append(item)
         else: new_vless.append(item)
 
-    # مرتب‌سازی بر اساس کمترین پینگ
     new_mtproto.sort(key=lambda x: x['ping'])
     new_vless.sort(key=lambda x: x['ping'])
 
     _CACHED_MTPROTO = new_mtproto[:10]
     _CACHED_VLESS   = new_vless[:10]
-    print(f"✅ کَش بروز شد! MTProto مجاز: {len(_CACHED_MTPROTO)} | Vless مجاز: {len(_CACHED_VLESS)}")
+    print(f"✅ کَش بروز شد! MTProto: {len(_CACHED_MTPROTO)} | Vless: {len(_CACHED_VLESS)}")
 
 # ══════════════════════════════════════════════════════════
 #  فرمت‌ساز پیام‌ها
@@ -213,13 +210,13 @@ def format_vless_msg(configs):
     for i, c in enumerate(configs[:3], 1):
         lines.append(f"*{i}\\. {c['flag']} {escape_md(c['country'])}*")
         lines.append(f"⚡ پینگ ایران: `{c['ping']}ms`")
-        lines.append(f"📋 برای کپی روی کادر زیر بزنید:")
+        lines.append(f"📋 برای کپی لمس کنید:")
         lines.append(f"`{escape_md(c['link'])}`\n")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
 
 # ══════════════════════════════════════════════════════════
-#  هندلرها و کیبوردهای شیشه‌ای ربات
+#  هندلرهای ربات
 # ══════════════════════════════════════════════════════════
 
 def build_menu():
@@ -232,12 +229,12 @@ def build_menu():
     ])
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = "👋 *به ابر\\-ربات هوشمند ضد فیلتر خوش آمدید\\!*\n\nتمام سرورها به صورت شبانه‌روزی تست شده و موارد فیلترشده در ایران خودکار حذف می‌شوند\\."
+    text = "👋 *به ابر\\-ربات هوشمند ضد فیلتر خوش آمدید\\!*"
     await update.message.reply_text(text, parse_mode="MarkdownV2", reply_markup=build_menu())
 
 async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer() # حل قطعی مشکل تایم‌اوت دکمه
+    await query.answer()
     data = query.data
 
     if not _CACHED_MTPROTO and not _CACHED_VLESS:
@@ -254,71 +251,72 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(format_vless_msg(_CACHED_VLESS), parse_mode="MarkdownV2")
             
     elif data == "random_connect":
-        # انتخاب رندوم از بین بهترین سرورها
         pool = _CACHED_MTPROTO[:3] + _CACHED_VLESS[:3]
         selected = random.choice(pool)
         if selected['type'] == "mtproto":
             txt = f"🎲 *پروکسی شانس شما \\(MTProto\\):*\n\n🌍 کشور: {selected['flag']} {escape_md(selected['country'])}\n⚡ پینگ: `{selected['ping']}ms`\n\n[🔗 برای اتصال فوری کلیک کنید]({selected['link']})"
-            await query.message.reply_text(txt, parse_mode="MarkdownV2")
         else:
             txt = f"🎲 *کانفیگ شانس شما \\(Vless\\):*\n\n🌍 کشور: {selected['flag']} {escape_md(selected['country'])}\n⚡ پینگ: `{selected['ping']}ms`\n\n📋 جهت کپی لمس کنید:\n`{escape_md(selected['link'])}`"
-            await query.message.reply_text(txt, parse_mode="MarkdownV2")
+        await query.message.reply_text(txt, parse_mode="MarkdownV2")
             
     elif data == "copy_all":
-        # ارسال لیست خام برای کپی راحت یکجا
         lines = ["📋 *کپی یکجای لینک‌های فعال برای اشتراک‌گذاری:*\n"]
         for p in _CACHED_MTPROTO[:5]: lines.append(f"`{escape_md(p['link'])}`")
         await query.message.reply_text("\n\n".join(lines), parse_mode="MarkdownV2")
         
     elif data == "show_stats":
-        uptime_hours = int((datetime.now() - _stats["start_time"]).total_seconds() // 3600)
-        text = f"📊 *وضعیت پایداری ربات آمورا*\n\n🔍 کل سرورهای بررسی شده: `{_stats['total_checked']}`\n✅ سرورهای زنده شناسایی شده: `{_stats['total_active']}`\n⏱ آپتایم سیستم: `{uptime_hours}` ساعت"
+        h = int((datetime.now() - _stats["start_time"]).total_seconds() // 3600)
+        text = f"📊 *وضعیت پایداری ربات*\n\n🔍 کل سرورهای بررسی شده: `{_stats['total_checked']}`\n✅ سرورهای زنده شناسایی شده: `{_stats['total_active']}`\n⏱ آپتایم سیستم: `{h}` ساعت"
         await query.message.reply_text(text, parse_mode="MarkdownV2")
 
 # ══════════════════════════════════════════════════════════
-#  زمان‌بند ۲۴ ساعته (Background Thread)
+#  زمان‌بند کانال و پس‌زمینه (Thread ایمن)
 # ══════════════════════════════════════════════════════════
 
 def run_schedule(bot_instance):
-    # اجرای اول برای پر شدن کَش به محض روشن شدن ربات
+    # پر شدن اولیه کَش به محض روشن شدن
     update_system_cache()
     
-    def job():
-        update_system_cache()
-        # ارسال خودکار به کانال در صورت تنظیم CHANNEL_ID
-        if CHANNEL_ID and _CACHED_MTPROTO:
+    # تابع ارسال خودکار به کانال (هر ۵ دقیقه)
+    def send_to_channel_job():
+        update_system_cache() # تست مجدد سرورها
+        if CHANNEL_ID and "YOUR_" not in CHANNEL_ID and _CACHED_MTPROTO:
             try:
+                msg_text = format_mtproto_msg(_CACHED_MTPROTO) + "\n\n📢 بروزرسانی خودکار هر ۵ دقیقه"
                 asyncio.run(bot_instance.send_message(
                     chat_id=CHANNEL_ID, 
-                    text=format_mtproto_msg(_CACHED_MTPROTO) + "\n\n🤖 @YourBotID", 
+                    text=msg_text, 
                     parse_mode="MarkdownV2", 
                     disable_web_page_preview=True
                 ))
-            except Exception as e: print(f"خطای ارسال به کانال: {e}")
+                print("📢 پست جدید پروکسی با موفقیت به کانال ارسال شد.")
+            except Exception as e:
+                print(f"❌ خطا در ارسال به کانال: {e}")
 
-    schedule.every(SEND_INTERVAL_MINUTES).minutes.do(job)
+    # تنظیم دقیق زمان‌بند برای ارسال ۵ دقیقه‌ای
+    schedule.every(SEND_INTERVAL_MINUTES).minutes.do(send_to_channel_job)
+    
     while True:
         schedule.run_pending()
         time.sleep(10)
 
 # ══════════════════════════════════════════════════════════
-#  اجرای اصلی (Main)
+#  Main
 # ══════════════════════════════════════════════════════════
 
 def main():
     if not BOT_TOKEN or "YOUR_" in BOT_TOKEN:
-        print("❌ خطای توکن! لطفا توکن ربات خود را در متغیرهای محیطی یا کد ست کنید.")
+        print("❌ خطای توکن! لطفا توکن ربات خود را تنظیم کنید.")
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    # راه‌اندازی بخش اسکنر در ترد جداگانه دائم‌الکار
     bot_instance = Bot(token=BOT_TOKEN)
     threading.Thread(target=run_schedule, args=(bot_instance,), daemon=True).start()
 
-    print("🚀 ربات چندمنظوره (MTProto + Vless) با سیستم کَش هوشمند فعال شد.")
+    print("🚀 ربات چندمنظوره آپدیت‌شده در حال اجراست...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
